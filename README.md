@@ -12,9 +12,9 @@
 
 The **SmartContractAuditBountyX** Intelligent Contract is deployed, finalized, and verified on GenLayer **studionet**:
 
-- **CONTRACT_ADDRESS:** `0xD58EddAD69dFbcf15E7D9513040e53794cB75663`
-- **TRANSACTION_HASH:** `0xe8cb89b06408506e52c52406ce5adabeaec11ed5bcd70fdc32494207dd8e2627`
-- **DEPLOYER_ADDRESS:** `0x66C37e3Fb8fD0BC50E112BF5c55f8438f7955ea3`
+- **CONTRACT_ADDRESS:** `0xEB7B71C95335117e7152507D1e44f89F56999225`
+- **TRANSACTION_HASH:** `0x77939add922b5d48d941e3bf2967facc6a112af9995a5f61beff58a447550ff5`
+- **DEPLOYER_ADDRESS:** `0xF6CaF8F30f263a6C06fBFEfd9B7C4B8A67F5D82b`
 - **NETWORK:** `studionet` (Chain ID: `61999` / `0xF1EF`)
 - **RPC_URL:** `https://studio.genlayer.com/api`
 - **RECEIPT_STATUS:** `5` (FINALIZED)

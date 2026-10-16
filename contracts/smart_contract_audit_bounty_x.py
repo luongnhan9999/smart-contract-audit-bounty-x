@@ -4,12 +4,6 @@ from dataclasses import dataclass
 import json
 
 
-try:
-    gl.UserError = gl.vm.UserError
-except Exception:
-    pass
-
-
 def _addr_str(addr: Address) -> str:
     """Safely format an Address instance into a lowercase hex string."""
     try:
@@ -222,7 +216,7 @@ class Contract(gl.Contract):
             verdict="PENDING",
             reason="Bounty locked in escrow. Awaiting fix commit SHA from auditor.",
             deadline=deadline,
-            created_at=self.bounty_count,
+            created_at=now_ts if now_ts > bigint(0) else self.bounty_count,
             resolved_at=bigint(0)
         )
 
@@ -288,7 +282,7 @@ class Contract(gl.Contract):
         bounty.auditor_payout = bigint(0)
         bounty.funder_refund = refund_val
         bounty.reason = "Bounty cancelled by funder after submission deadline elapsed without verified fix."
-        bounty.resolved_at = self.bounty_count
+        bounty.resolved_at = now_ts if now_ts > bigint(0) else self.bounty_count
         self.bounties[bounty_id] = bounty
 
         if refund_val > bigint(0):
@@ -307,6 +301,7 @@ class Contract(gl.Contract):
         if bounty.status != "SUBMITTED":
             raise gl.UserError("Bounty must be in SUBMITTED state to adjudicate.")
 
+        now_ts = self._get_current_timestamp()
         owner_name, repo_name = _parse_canonical_repo(bounty.repo_url)
         raw_patch_url = f"https://raw.githubusercontent.com/{owner_name}/{repo_name}/{bounty.patch_commit_sha}/{bounty.target_file_path}"
         vuln_local = str(bounty.vulnerability_details)
@@ -441,7 +436,7 @@ Respond ONLY with a VALID JSON object (no markdown, no backticks):
             bounty.auditor_payout = total_bounty
             bounty.funder_refund = bigint(0)
             bounty.reason = reason
-            bounty.resolved_at = self.bounty_count
+            bounty.resolved_at = now_ts if now_ts > bigint(0) else self.bounty_count
             self.bounties[bounty_id] = bounty
             _safe_transfer(bounty.auditor, total_bounty)
 
@@ -454,7 +449,7 @@ Respond ONLY with a VALID JSON object (no markdown, no backticks):
             bounty.auditor_payout = auditor_share
             bounty.funder_refund = funder_share
             bounty.reason = reason
-            bounty.resolved_at = self.bounty_count
+            bounty.resolved_at = now_ts if now_ts > bigint(0) else self.bounty_count
             self.bounties[bounty_id] = bounty
             _safe_transfer(bounty.auditor, auditor_share)
             _safe_transfer(bounty.project_funder, funder_share)
