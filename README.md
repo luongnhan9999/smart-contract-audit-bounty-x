@@ -12,7 +12,7 @@
 
 The **SmartContractAuditBountyX** Intelligent Contract is deployed, finalized, and verified on GenLayer **studionet**:
 
-- **CONTRACT_ADDRESS:** `0xEB7B71C95335117e7152507D1e44f89F56999225`
+- **CONTRACT_ADDRESS:** `0x26f3AC0A29Cf03fb0e882d63612c2D3485d8Ae87`
 - **TRANSACTION_HASH:** `0x77939add922b5d48d941e3bf2967facc6a112af9995a5f61beff58a447550ff5`
 - **DEPLOYER_ADDRESS:** `0xF6CaF8F30f263a6C06fBFEfd9B7C4B8A67F5D82b`
 - **NETWORK:** `studionet` (Chain ID: `61999` / `0xF1EF`)
