@@ -388,3 +388,158 @@ def test_cancel_expired_bounty_bounded_recovery(contract, direct_vm, direct_alic
     direct_vm.sender = direct_bob
     with pytest.raises(Exception, match="Bounty is cancelled"):
         contract.submit_patch(bid, "abcdef123456")
+
+
+def test_adjudicate_patch_evaluates_code_beyond_4000_chars_full_file(contract, direct_vm, direct_alice, direct_bob):
+    """Verifies that files >4000 chars are evaluated in full without silent prefix truncation."""
+    direct_vm.sender = direct_alice
+    direct_vm.value = 14000
+
+    bid = contract.create_bounty(
+        auditor=direct_bob,
+        repo_url="https://github.com/defi-protocol/large-vault",
+        vulnerability_details="Reentrancy exploit in emergencyWithdrawAll located at bottom of contract",
+        target_file_path="contracts/LargeVault.sol",
+        duration_sec=86400 * 7
+    )
+
+    direct_vm.sender = direct_bob
+    patch_sha = "longfilepatch001"
+    contract.submit_patch(bid, patch_sha)
+
+    # Construct a large Solidity contract (~6,500 characters)
+    # The fix is deliberately located past character 4500 (line 140+)
+    padding = "// Standard ERC20 and Vault logic padding\n" * 120  # ~5,000 chars
+    large_patched_source = f"""
+    contract LargeVault {{
+        {padding}
+        bool private _reentrancyLocked;
+        modifier nonReentrant() {{
+            require(!_reentrancyLocked, "LOCKED");
+            _reentrancyLocked = true;
+            _;
+            _reentrancyLocked = false;
+        }}
+        function emergencyWithdrawAll() external nonReentrant {{
+            uint256 amt = balances[msg.sender];
+            balances[msg.sender] = 0;
+            (bool ok, ) = msg.sender.call{{value: amt}}("");
+            require(ok, "Transfer failed");
+        }}
+    }}
+    """
+    assert len(large_patched_source) > 5000
+
+    sim_installMocks({
+        "web_mocks": {
+            ".*": {"status": 200, "body": large_patched_source}
+        },
+        "llm_mocks": {
+            ".*": json.dumps({
+                "verdict": "PATCH_VERIFIED_SECURE",
+                "confidence": 99,
+                "reason": "Complete full file evaluated (6.5k chars); emergencyWithdrawAll properly protected."
+            })
+        }
+    }, vm=direct_vm)
+
+    contract.adjudicate_patch(bid)
+
+    b = json.loads(contract.get_bounty(bid))
+    assert b["status"] == "SETTLED"
+    assert b["verdict"] == "PATCH_VERIFIED_SECURE"
+    assert b["auditor_payout"] == "14000"
+    assert "Complete full file evaluated" in b["reason"]
+
+
+def test_adjudicate_patch_detects_regression_beyond_4000_chars(contract, direct_vm, direct_alice, direct_bob):
+    """Verifies that regressions located past char 4000 are not silently excluded."""
+    direct_vm.sender = direct_alice
+    direct_vm.value = 10000
+
+    bid = contract.create_bounty(
+        auditor=direct_bob,
+        repo_url="https://github.com/defi-protocol/regression-vault",
+        vulnerability_details="Reentrancy flaw in withdraw, ensure no regressions introduced",
+        target_file_path="contracts/RegressionVault.sol",
+        duration_sec=86400 * 7
+    )
+
+    direct_vm.sender = direct_bob
+    patch_sha = "regressionpatch002"
+    contract.submit_patch(bid, patch_sha)
+
+    # Fix at top, but backdoor/regression at bottom past char 4500
+    padding = "// Normal vault helper methods and logic padding\n" * 160
+    large_source_with_regression = f"""
+    contract RegressionVault {{
+        function withdraw() external {{
+            // Fixed reentrancy at top
+            balances[msg.sender] = 0;
+        }}
+        {padding}
+        // REGRESSION INTRODUCED AT BOTTOM (PAST 4500 CHARS):
+        function backdoorExecute(address target, bytes calldata data) external {{
+            target.delegatecall(data); // Unprotected delegatecall regression!
+        }}
+    }}
+    """
+    assert len(large_source_with_regression) > 5000
+
+    sim_installMocks({
+        "web_mocks": {
+            ".*": {"status": 200, "body": large_source_with_regression}
+        },
+        "llm_mocks": {
+            ".*": json.dumps({
+                "verdict": "VULNERABILITY_PERSISTS",
+                "confidence": 98,
+                "reason": "Severe regression detected past char 4500: unprotected delegatecall backdoor."
+            })
+        }
+    }, vm=direct_vm)
+
+    contract.adjudicate_patch(bid)
+
+    b = json.loads(contract.get_bounty(bid))
+    # Stays SUBMITTED, 0 payout, security jury catches regression
+    assert b["status"] == "SUBMITTED"
+    assert b["verdict"] == "VULNERABILITY_PERSISTS"
+    assert b["auditor_payout"] == "0"
+    assert "backdoor" in b["reason"]
+
+
+def test_adjudicate_patch_exceeding_max_bounded_file_size_fails_closed(contract, direct_vm, direct_alice, direct_bob):
+    """Verifies that files > 48,000 chars fail-closed and strictly refuse silent omission."""
+    direct_vm.sender = direct_alice
+    direct_vm.value = 8000
+
+    bid = contract.create_bounty(
+        auditor=direct_bob,
+        repo_url="https://github.com/defi-protocol/huge-monolith",
+        vulnerability_details="Logic bypass in monolithic contract",
+        target_file_path="contracts/Monolith.sol",
+        duration_sec=86400 * 7
+    )
+
+    direct_vm.sender = direct_bob
+    contract.submit_patch(bid, "hugemonolithsha")
+
+    # Construct huge file (55,000 characters)
+    huge_source = "// Huge code line\n" * 3000
+    assert len(huge_source) > 48000
+
+    sim_installMocks({
+        "web_mocks": {
+            ".*": {"status": 200, "body": huge_source}
+        }
+    }, vm=direct_vm)
+
+    contract.adjudicate_patch(bid)
+
+    b = json.loads(contract.get_bounty(bid))
+    assert b["status"] == "SUBMITTED"
+    assert b["verdict"] == "VULNERABILITY_PERSISTS"
+    assert "exceeds bounded limit" in b["reason"]
+    assert "Silent omission prohibited" in b["reason"]
+

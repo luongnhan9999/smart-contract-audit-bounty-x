@@ -12,9 +12,9 @@
 
 The **SmartContractAuditBountyX** Intelligent Contract is deployed, finalized, and verified on GenLayer **studionet**:
 
-- **CONTRACT_ADDRESS:** `0x26f3AC0A29Cf03fb0e882d63612c2D3485d8Ae87`
-- **TRANSACTION_HASH:** `0x77939add922b5d48d941e3bf2967facc6a112af9995a5f61beff58a447550ff5`
-- **DEPLOYER_ADDRESS:** `0xF6CaF8F30f263a6C06fBFEfd9B7C4B8A67F5D82b`
+- **CONTRACT_ADDRESS:** `0x90245Ed3762964bD1fDfe8076bB6A49281C52A23`
+- **TRANSACTION_HASH:** `0x6a1b96983639720bd51209429f2afef7d300f27c66bc8930c9bf85b42221153e`
+- **DEPLOYER_ADDRESS:** `0x778cEde2FCbe3e5Bc0ccA7D32bb99Fd01cD8f8Ec`
 - **NETWORK:** `studionet` (Chain ID: `61999` / `0xF1EF`)
 - **RPC_URL:** `https://studio.genlayer.com/api`
 - **RECEIPT_STATUS:** `5` (FINALIZED)
@@ -55,7 +55,12 @@ flowchart TD
     subgraph Consensus["3. Autonomous Validator Jury Consensus"]
         Anyone["Auditor / Funder / Keeper"] -->|"adjudicate_patch(bounty_id)"| Jury["GenLayer Validator Jury"]
         Jury --> Scrape["gl.nondet.web.render(canonical_raw_patch_url)"]
-        Scrape --> LLM["gl.nondet.exec_prompt(Proof-of-Patch Security Rubric)"]
+        Scrape --> BoundCheck{"Code Size Bound Check"}
+        BoundCheck -- "size > 48k" --> FailClosed["VULNERABILITY_PERSISTS (Silent omission prohibited)"]
+        BoundCheck -- "<= 24k chars" --> FullFile["Bounded Full-File: 100% untruncated source"]
+        BoundCheck -- "24k - 48k chars" --> Chunked["Bounded Chunked: Sliding window with 2k overlap"]
+        FullFile --> LLM["gl.nondet.exec_prompt(Proof-of-Patch & Regression Rubric)"]
+        Chunked --> LLM
         LLM --> Discrete{"Discrete Consensus (100% Verdict Match)"}
     end
 
@@ -74,7 +79,13 @@ flowchart TD
 
 ## 4. Key Protocol Innovations
 
-### 1. Canonical GitHub Host & Raw Binding
+### 1. Bounded Full-File & Chunked Adjudication (No Silent Omission)
+Unlike naive implementations that truncate source code using a fixed prefix (e.g. `[:4000]`), **SmartContractAuditBountyX** strictly implements a **Bounded Full-File & Chunked Strategy** that prevents material code or regressions from being silently excluded:
+- **Bounded Full-File Analysis ($\le 24,000$ chars / $\approx 600-800$ Solidity lines):** 100% of the complete target file is passed in full to the LLM validator jury with zero truncation. Validators evaluate both the primary vulnerability mitigation and scan the entire file for side-effect bugs or newly introduced regressions.
+- **Bounded Chunked Analysis ($24,000 - 48,000$ chars):** The contract segments the code into sliding window chunks of $20,000$ characters with a $2,000$-character overlap across boundaries. Every chunk is audited; if any chunk retains the vulnerability or introduces a regression, the adjudication evaluates to `VULNERABILITY_PERSISTS`.
+- **Anti-Silent-Exclusion Guarantee ($> 48,000$ chars):** If a target file exceeds the upper bounded capacity, the contract fails closed (`VULNERABILITY_PERSISTS`) with an explicit reason, refusing to silently truncate code and allowing unreviewed regressions to slip through.
+
+### 2. Canonical GitHub Host & Raw Binding
 The contract never accepts arbitrary, spoofed web URLs from users. Instead:
 - It enforces authoritative `github.com` repositories via `_parse_canonical_repo`.
 - It sanitizes paths to prevent directory traversal attacks (`_clean_path`, rejecting `..` and `./`).
@@ -84,7 +95,7 @@ The contract never accepts arbitrary, spoofed web URLs from users. Instead:
   ```
 - This guarantees validators inspect the authentic code at the exact immutable Git commit SHA.
 
-### 2. 100% Discrete Consensus Binding
+### 3. 100% Discrete Consensus Binding
 Standard LLMs produce slight variations in natural-language reasoning. **SmartContractAuditBountyX** prevents validator divergence while retaining explainability by enforcing **discrete semantic equivalence** inside `validator_fn`:
 
 ```python
@@ -98,15 +109,15 @@ def validator_fn(leader_res) -> bool:
     return leader["verdict"] == mine["verdict"]
 ```
 
-### 3. Economic Determinism & Payout Matrix
+### 4. Economic Determinism & Payout Matrix
 
 | Security Verdict | Adjudication Condition | Financial Disbursement |
 |---|---|---|
-| `PATCH_VERIFIED_SECURE` | The patch completely mitigates the vulnerability (e.g., reentrancy guards, checks-effects-interactions, proper access control) without regressions. | **100% Bounty Reward Disbursed to Auditor**. Bounty state transitions to `SETTLED`. |
+| `PATCH_VERIFIED_SECURE` | The patch completely mitigates the vulnerability (e.g., reentrancy guards, checks-effects-interactions, proper access control) without introducing regressions anywhere in the file. | **100% Bounty Reward Disbursed to Auditor**. Bounty state transitions to `SETTLED`. |
 | `PARTIAL_COVERAGE` | The patch addresses part of the attack surface but leaves open edge cases or incomplete mitigation. | **50% Disbursed to Auditor, 50% Refunded to Funder**. Bounty state transitions to `SETTLED`. |
-| `VULNERABILITY_PERSISTS` | The vulnerability is still exploitable, the file is unchanged, the fix is cosmetic, or the file returns 404/offline. | **0% Disbursed**. Bounty remains `SUBMITTED`, giving the auditor opportunity to submit an updated commit SHA before the deadline. |
+| `VULNERABILITY_PERSISTS` | The vulnerability is still exploitable, regressions are detected, the file is unchanged, the fix is cosmetic, or the file returns 404/offline/exceeds bound. | **0% Disbursed**. Bounty remains `SUBMITTED`, giving the auditor opportunity to submit an updated commit SHA before the deadline. |
 
-### 4. Bounded Recovery Path (Anti-Capital Trap)
+### 5. Bounded Recovery Path (Anti-Capital Trap)
 If an auditor abandons the bounty, misses the agreed deadline, or fails to provide a passing patch, the project funder is protected against locked capital:
 - Calling `cancel_expired_bounty(bounty_id)` after `deadline` has elapsed immediately refunds **100% of escrowed funds** back to the funder and marks the bounty `CANCELLED`.
 - Premature cancellation during the active bounty window is strictly prevented on-chain.
@@ -140,7 +151,7 @@ If an auditor abandons the bounty, misses the agreed deadline, or fails to provi
 
 ## 6. Test Suite & Verification
 
-The project includes full unit test coverage using `gltest` (9/9 passed in under 12 seconds):
+The project includes full unit test coverage using `gltest` (**12/12 passed**):
 
 ```bash
 gltest
@@ -156,6 +167,9 @@ gltest
 - **`test_adjudicate_patch_vulnerability_persists_resubmission`**: Simulates failing patch evaluation, 0 payout, maintaining `SUBMITTED` state, and auditor re-submission of updated commit SHA.
 - **`test_adjudicate_patch_github_offline_or_404`**: Simulates GitHub 404/offline response handling, defaulting safely to `VULNERABILITY_PERSISTS`.
 - **`test_cancel_expired_bounty_bounded_recovery`**: Tests non-funder cancellation rejection, premature cancellation rejection, successful post-deadline 100% funder refund, double-cancellation prevention, and post-cancellation patch rejection.
+- **`test_adjudicate_patch_evaluates_code_beyond_4000_chars_full_file`**: Verifies that contracts $>4,000$ characters are evaluated in full without silent truncation and verified secure when the fix is past line 140.
+- **`test_adjudicate_patch_detects_regression_beyond_4000_chars`**: Verifies that new regressions located past character 4,500 (e.g. Unprotected delegatecall backdoors) are actively flagged and block payouts.
+- **`test_adjudicate_patch_exceeding_max_bounded_file_size_fails_closed`**: Verifies that files exceeding bounded limits fail closed with an explicit error rather than silently truncating.
 
 ---
 

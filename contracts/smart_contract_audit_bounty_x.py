@@ -323,10 +323,26 @@ class Contract(gl.Contract):
                     "reason": "Patched file is offline, 404, or blank on GitHub."
                 }
 
-            snippet = patched_code[:4000]
+            full_code = patched_code.strip()
+            total_chars = len(full_code)
+            line_count = len(full_code.splitlines())
 
-            prompt = f"""You are an Objective Smart Contract Security Auditor and Proof-of-Patch Arbiter on GenLayer.
-Evaluate whether the code at the submitted commit successfully neutralizes the declared vulnerability.
+            # Bounded Anti-Silent Exclusion Bounds
+            MAX_TOTAL_FILE_CHARS = 48000
+            MAX_SINGLE_PASS_CHARS = 24000
+            CHUNK_SIZE = 20000
+            CHUNK_OVERLAP = 2000
+
+            if total_chars > MAX_TOTAL_FILE_CHARS:
+                return {
+                    "verdict": "VULNERABILITY_PERSISTS",
+                    "confidence": 100,
+                    "reason": f"File size ({total_chars} chars) exceeds bounded limit ({MAX_TOTAL_FILE_CHARS} chars). Silent omission prohibited."
+                }
+
+            def audit_code_section(code_text: str, scope_description: str) -> dict:
+                prompt = f"""You are an Objective Smart Contract Security Auditor and Proof-of-Patch Arbiter on GenLayer.
+Evaluate whether the code at the submitted commit successfully neutralizes the declared vulnerability and introduces zero regressions or side-effects.
 
 TARGET FILE: {file_path_local}
 REPORTED VULNERABILITY:
@@ -334,16 +350,19 @@ REPORTED VULNERABILITY:
 {vuln_local}
 \"\"\"
 
-PATCHED SOURCE CODE (from GitHub Raw commit {raw_patch_url}):
+AUDIT SCOPE:
+{scope_description}
+
+SOURCE CODE TO AUDIT (from GitHub Raw commit {raw_patch_url}):
 \"\"\"
-{snippet}
+{code_text}
 \"\"\"
 
 AUDIT EVALUATION RUBRIC:
 Classify into strictly ONE of the discrete verdicts:
-- "PATCH_VERIFIED_SECURE": The patch completely mitigates the security flaw (e.g., proper checks-effects-interactions, reentrancy guards, safe math, access control) without introducing regressions.
-- "PARTIAL_COVERAGE": The patch addresses part of the attack vector but leaves edge cases open or implements an incomplete mitigation.
-- "VULNERABILITY_PERSISTS": The vulnerability is still exploitable, the file is unchanged, or the fix is superficial/cosmetic.
+- "PATCH_VERIFIED_SECURE": The patch completely mitigates the security flaw (e.g., proper checks-effects-interactions, reentrancy guards, safe math, access control) without introducing regressions, logic bugs, or side-effects anywhere in the code.
+- "PARTIAL_COVERAGE": The patch addresses part of the attack vector but leaves edge cases open, implements an incomplete mitigation, or partially addresses regressions.
+- "VULNERABILITY_PERSISTS": The vulnerability is still exploitable, the file is unchanged, the fix is superficial/cosmetic, or new security regressions/flaws are present.
 
 OUTPUT FORMAT:
 Respond ONLY with a VALID JSON object (no markdown, no backticks):
@@ -353,48 +372,91 @@ Respond ONLY with a VALID JSON object (no markdown, no backticks):
   "reason": "<concise explanation max 220 characters>"
 }}"""
 
-            try:
-                raw_res = gl.nondet.exec_prompt(prompt, response_format="json")
-                parsed = None
-                if isinstance(raw_res, dict):
-                    parsed = raw_res
-                elif hasattr(raw_res, "content") and isinstance(raw_res.content, dict):
-                    parsed = raw_res.content
-                else:
-                    text = raw_res.content if hasattr(raw_res, "content") else str(raw_res)
-                    cleaned = str(text).strip()
-                    if cleaned.startswith("```json"):
-                        cleaned = cleaned[7:]
-                    elif cleaned.startswith("```"):
-                        cleaned = cleaned[3:]
-                    if cleaned.endswith("```"):
-                        cleaned = cleaned[:-3]
-                    parsed = json.loads(cleaned.strip())
-
-                verdict_candidate = str(parsed.get("verdict", "VULNERABILITY_PERSISTS")).strip().upper()
-                valid_verdicts = ("PATCH_VERIFIED_SECURE", "PARTIAL_COVERAGE", "VULNERABILITY_PERSISTS")
-                if verdict_candidate not in valid_verdicts:
-                    verdict_candidate = "VULNERABILITY_PERSISTS"
-
                 try:
-                    conf = int(parsed.get("confidence", 0))
-                    conf = max(0, min(100, conf))
-                except Exception:
-                    conf = 50
+                    raw_res = gl.nondet.exec_prompt(prompt, response_format="json")
+                    parsed = None
+                    if isinstance(raw_res, dict):
+                        parsed = raw_res
+                    elif hasattr(raw_res, "content") and isinstance(raw_res.content, dict):
+                        parsed = raw_res.content
+                    else:
+                        text = raw_res.content if hasattr(raw_res, "content") else str(raw_res)
+                        cleaned = str(text).strip()
+                        if cleaned.startswith("```json"):
+                            cleaned = cleaned[7:]
+                        elif cleaned.startswith("```"):
+                            cleaned = cleaned[3:]
+                        if cleaned.endswith("```"):
+                            cleaned = cleaned[:-3]
+                        parsed = json.loads(cleaned.strip())
 
-                reason_str = str(parsed.get("reason", "Patch evaluated by autonomous security jury."))[:220]
+                    verdict_candidate = str(parsed.get("verdict", "VULNERABILITY_PERSISTS")).strip().upper()
+                    valid_verdicts = ("PATCH_VERIFIED_SECURE", "PARTIAL_COVERAGE", "VULNERABILITY_PERSISTS")
+                    if verdict_candidate not in valid_verdicts:
+                        verdict_candidate = "VULNERABILITY_PERSISTS"
 
-                return {
-                    "verdict": verdict_candidate,
-                    "confidence": conf,
-                    "reason": reason_str
-                }
-            except Exception as e:
-                return {
-                    "verdict": "VULNERABILITY_PERSISTS",
-                    "confidence": 0,
-                    "reason": f"Evaluation error: {str(e)[:100]}"
-                }
+                    try:
+                        conf = int(parsed.get("confidence", 0))
+                        conf = max(0, min(100, conf))
+                    except Exception:
+                        conf = 50
+
+                    reason_str = str(parsed.get("reason", "Patch evaluated by autonomous security jury."))[:220]
+
+                    return {
+                        "verdict": verdict_candidate,
+                        "confidence": conf,
+                        "reason": reason_str
+                    }
+                except Exception as e:
+                    return {
+                        "verdict": "VULNERABILITY_PERSISTS",
+                        "confidence": 0,
+                        "reason": f"Evaluation error: {str(e)[:100]}"
+                    }
+
+            if total_chars <= MAX_SINGLE_PASS_CHARS:
+                # Bounded Full-File: 100% material code evaluated with zero truncation
+                scope_info = f"FULL FILE AUDIT: {line_count} lines, {total_chars} characters (100% complete source code evaluated with zero truncation)."
+                return audit_code_section(full_code, scope_info)
+
+            # Bounded Chunked Evaluation for files between 24k and 48k chars
+            chunks = []
+            start = 0
+            while start < total_chars:
+                end = min(start + CHUNK_SIZE, total_chars)
+                chunks.append((start, end, full_code[start:end]))
+                if end == total_chars:
+                    break
+                start = end - CHUNK_OVERLAP
+
+            worst_verdict = "PATCH_VERIFIED_SECURE"
+            combined_reasons = []
+            min_confidence = 100
+
+            for idx, (c_start, c_end, c_text) in enumerate(chunks):
+                scope_info = f"CHUNK {idx + 1}/{len(chunks)}: characters {c_start} to {c_end} of {total_chars} total characters (sliding window with overlap, zero omitted code)."
+                chunk_res = audit_code_section(c_text, scope_info)
+                v = chunk_res["verdict"]
+                min_confidence = min(min_confidence, chunk_res.get("confidence", 50))
+
+                if v == "VULNERABILITY_PERSISTS":
+                    return {
+                        "verdict": "VULNERABILITY_PERSISTS",
+                        "confidence": min_confidence,
+                        "reason": f"Chunk {idx + 1} flaw: " + chunk_res.get("reason", "")[:180]
+                    }
+                elif v == "PARTIAL_COVERAGE":
+                    worst_verdict = "PARTIAL_COVERAGE"
+                    combined_reasons.append(f"C{idx + 1}: {chunk_res.get('reason', '')[:80]}")
+                else:
+                    combined_reasons.append(f"C{idx + 1}: verified secure")
+
+            return {
+                "verdict": worst_verdict,
+                "confidence": min_confidence,
+                "reason": "; ".join(combined_reasons)[:220]
+            }
 
         def validator_fn(leader_res) -> bool:
             if not isinstance(leader_res, gl.vm.Return):
